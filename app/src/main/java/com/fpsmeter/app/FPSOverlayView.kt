@@ -3,12 +3,14 @@ package com.fpsmeter.app
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Choreographer
 import android.view.View
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -36,6 +38,21 @@ class FPSOverlayView @JvmOverloads constructor(
     @Volatile
     private var isMonitoring = false
     private var hasRootRealTime = false
+    private var hasRealTimeSource = false
+
+    private val displayHz: Int by lazy {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display?.refreshRate?.toInt() ?: 60
+            } else {
+                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay?.refreshRate?.toInt() ?: 60
+            }
+        } catch (_: Exception) {
+            60
+        }
+    }
 
     companion object {
         private const val TAG = "FPSMeter_OverlayView"
@@ -83,13 +100,14 @@ class FPSOverlayView @JvmOverloads constructor(
         }
     }
 
-    fun startFPSMonitoring() {
-        Log.d(TAG, "Starting FPS monitoring")
+    fun startFPSMonitoring(skipRootMonitor: Boolean = false) {
+        Log.d(TAG, "Starting FPS monitoring (skipRoot=$skipRootMonitor)")
         try {
             if (isMonitoring) return
             isMonitoring = true
             frameCount = 0
             hasRootRealTime = false
+            hasRealTimeSource = false
             lastUpdateTimeNanos = System.nanoTime()
             fpsCalculator.reset()
 
@@ -100,13 +118,15 @@ class FPSOverlayView @JvmOverloads constructor(
                 gpuTextView.visibility = View.GONE
             }
 
-            // Start hardware-level real-time in-game monitor
-            realTimeMonitor = RealTimeFPSMonitor { metrics ->
-                if (!isMonitoring) return@RealTimeFPSMonitor
-                hasRootRealTime = metrics.isRealTimeGameFPS
-                updateFromRealTimeMetrics(metrics)
-            }.apply {
-                start()
+            if (!skipRootMonitor) {
+                // Start hardware-level real-time in-game root monitor
+                realTimeMonitor = RealTimeFPSMonitor { metrics ->
+                    if (!isMonitoring) return@RealTimeFPSMonitor
+                    hasRootRealTime = metrics.isRealTimeGameFPS
+                    updateFromRealTimeMetrics(metrics)
+                }.apply {
+                    start()
+                }
             }
 
             // Also keep Choreographer running as baseline/fallback
@@ -138,8 +158,39 @@ class FPSOverlayView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Update FPS overlay directly from MediaProjection screen frame engine (Non-Root Real-Time).
+     */
+    fun updateRealTimeFPS(fps: Double, frameTimeMs: Double, isScreenCapture: Boolean = true) {
+        hasRealTimeSource = true
+        post {
+            if (!isMonitoring) return@post
+
+            val color = when {
+                fps >= 55.0 -> ContextCompat.getColor(context, R.color.fps_good)
+                fps >= 30.0 -> ContextCompat.getColor(context, R.color.fps_medium)
+                fps > 0.0 -> ContextCompat.getColor(context, R.color.fps_poor)
+                else -> Color.GRAY
+            }
+
+            fpsTextView.text = "FPS: ${fpsFormat.format(fps)}"
+            fpsTextView.setTextColor(color)
+
+            appTextView.text = if (isScreenCapture) "⚡ Real-Time In-Game" else "⚡ Hardware IPC"
+            appTextView.visibility = View.VISIBLE
+
+            if (fps > 0.0) {
+                gpuTextView.text = "${fpsFormat.format(frameTimeMs)} ms • ${displayHz}Hz display"
+            } else {
+                gpuTextView.text = "Idle • ${displayHz}Hz display"
+            }
+            gpuTextView.visibility = View.VISIBLE
+        }
+    }
+
     private fun updateFromRealTimeMetrics(metrics: PerformanceMetrics) {
         if (!metrics.isRealTimeGameFPS) return
+        hasRealTimeSource = true
 
         val fps = metrics.fps
         val color = when {
@@ -157,12 +208,16 @@ class FPSOverlayView @JvmOverloads constructor(
             appTextView.text = "Game: $shortName"
             appTextView.visibility = View.VISIBLE
         } else {
-            appTextView.text = "Real-Time FPS"
+            appTextView.text = "⚡ Real-Time In-Game"
             appTextView.visibility = View.VISIBLE
         }
 
         if (metrics.gpuLoad != null) {
-            gpuTextView.text = "GPU: ${metrics.gpuLoad}%"
+            gpuTextView.text = "GPU: ${metrics.gpuLoad}% • ${displayHz}Hz display"
+            gpuTextView.visibility = View.VISIBLE
+        } else {
+            val frameTime = if (fps > 0) (1000.0 / fps) else 0.0
+            gpuTextView.text = "${fpsFormat.format(frameTime)} ms • ${displayHz}Hz display"
             gpuTextView.visibility = View.VISIBLE
         }
     }
@@ -174,9 +229,8 @@ class FPSOverlayView @JvmOverloads constructor(
             frameCount++
             fpsCalculator.onFrame(frameTimeNanos)
 
-            // If real-time in-game root monitor is active, it handles updates.
-            // If not active, fall back to display refresh rate.
-            if (!hasRootRealTime && (frameCount % 20 == 0 || (frameTimeNanos - lastUpdateTimeNanos) >= UPDATE_INTERVAL_NANOS)) {
+            // If real-time monitor (MediaProjection or Root) is active, do not overwrite with display Hz.
+            if (!hasRealTimeSource && !hasRootRealTime && (frameCount % 20 == 0 || (frameTimeNanos - lastUpdateTimeNanos) >= UPDATE_INTERVAL_NANOS)) {
                 updateFallbackDisplay(fpsCalculator.fps)
                 lastUpdateTimeNanos = frameTimeNanos
             }
@@ -200,7 +254,7 @@ class FPSOverlayView @JvmOverloads constructor(
                 else -> Color.GRAY
             }
             fpsTextView.setTextColor(color)
-            appTextView.text = "(Root for in-game FPS)"
+            appTextView.text = "Display Refresh Rate"
             appTextView.visibility = View.VISIBLE
         }
     }

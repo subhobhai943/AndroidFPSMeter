@@ -1,5 +1,6 @@
 package com.fpsmeter.app
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -28,6 +30,8 @@ class FPSMeterService : Service() {
     private var isOverlayVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var screenCaptureMonitor: ScreenCaptureFPSMonitor? = null
+
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "fps_meter_channel"
@@ -36,6 +40,9 @@ class FPSMeterService : Service() {
         const val ACTION_STOP = "com.fpsmeter.app.ACTION_STOP"
         const val ACTION_STATE_CHANGED = "com.fpsmeter.app.ACTION_STATE_CHANGED"
         const val EXTRA_IS_RUNNING = "extra_is_running"
+
+        const val EXTRA_PROJECTION_RESULT_CODE = "extra_projection_result_code"
+        const val EXTRA_PROJECTION_DATA = "extra_projection_data"
 
         @Volatile
         var isRunning: Boolean = false
@@ -66,21 +73,48 @@ class FPSMeterService : Service() {
         }
 
         try {
-            val notification = createNotification()
+            val resultCode = intent?.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, Activity.RESULT_CANCELED)
+                ?: Activity.RESULT_CANCELED
+
+            val projectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra(EXTRA_PROJECTION_DATA)
+            }
+
+            val hasProjection = (resultCode == Activity.RESULT_OK && projectionData != null)
+            val notification = createNotification(hasProjection)
+
+            // Start foreground with proper FGS types
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
+                val fgsType = if (hasProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                } else {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
+                }
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val fgsType = if (hasProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    0
+                }
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
 
             isRunning = true
             broadcastState(true)
-            showOverlay()
+
+            // Show HUD overlay
+            showOverlay(skipRootMonitor = hasProjection)
+
+            // If MediaProjection credentials were provided, start non-root real-time frame engine
+            if (hasProjection) {
+                startScreenCaptureEngine(resultCode, projectionData!!)
+            }
 
             return START_STICKY
         } catch (e: Exception) {
@@ -93,10 +127,39 @@ class FPSMeterService : Service() {
         }
     }
 
+    private fun startScreenCaptureEngine(resultCode: Int, projectionData: Intent) {
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val mediaProjection = projectionManager.getMediaProjection(resultCode, projectionData)
+
+            if (mediaProjection != null) {
+                screenCaptureMonitor = ScreenCaptureFPSMonitor(
+                    context = this,
+                    mediaProjection = mediaProjection,
+                    onFpsUpdate = { fps, frameTimeMs ->
+                        overlayView?.updateRealTimeFPS(fps, frameTimeMs, isScreenCapture = true)
+                    },
+                    onStopped = {
+                        Log.d(TAG, "Screen capture projection stopped by system")
+                        stopSelf()
+                    }
+                ).apply {
+                    start()
+                }
+                Log.d(TAG, "ScreenCaptureFPSMonitor successfully initialized and running")
+            } else {
+                Log.w(TAG, "getMediaProjection returned null")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize ScreenCaptureFPSMonitor", e)
+            showToast("Screen capture engine failed: ${e.message}")
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun showOverlay() {
-        Log.d(TAG, "Attempting to show overlay")
+    private fun showOverlay(skipRootMonitor: Boolean) {
+        Log.d(TAG, "Attempting to show overlay (skipRoot=$skipRootMonitor)")
 
         if (isOverlayVisible) {
             Log.w(TAG, "Overlay already visible")
@@ -136,7 +199,7 @@ class FPSMeterService : Service() {
 
             windowManager.addView(overlayView, params)
             isOverlayVisible = true
-            overlayView?.startFPSMonitoring()
+            overlayView?.startFPSMonitoring(skipRootMonitor = skipRootMonitor)
             Log.d(TAG, "Overlay added to WindowManager successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Error showing overlay", e)
@@ -167,6 +230,15 @@ class FPSMeterService : Service() {
         Log.d(TAG, "Service onDestroy called")
         isRunning = false
         broadcastState(false)
+
+        try {
+            screenCaptureMonitor?.stop()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping screenCaptureMonitor", e)
+        } finally {
+            screenCaptureMonitor = null
+        }
+
         hideOverlay()
         super.onDestroy()
     }
@@ -200,7 +272,7 @@ class FPSMeterService : Service() {
         }
     }
 
-    private fun createNotification(): Notification {
+    private fun createNotification(isRealTimeScreenCapture: Boolean): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -222,9 +294,15 @@ class FPSMeterService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag
         )
 
+        val modeDescription = if (isRealTimeScreenCapture) {
+            "Real-time in-game FPS monitoring active"
+        } else {
+            "FPS monitoring active"
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("Monitoring FPS in real-time")
+            .setContentText(modeDescription)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(openAppPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
