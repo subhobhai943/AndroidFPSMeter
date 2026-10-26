@@ -18,8 +18,8 @@ The Gradle wrapper JAR file is currently missing from the repository. Add it usi
 
 1. Clone the repository if you haven't already:
    ```bash
-   git clone https://github.com/subhobhai943/AndroidFPSMeter-v2.git
-   cd AndroidFPSMeter-v2
+   git clone https://github.com/subhobhai943/AndroidFPSMeter.git
+   cd AndroidFPSMeter
    ```
 
 2. Run the Gradle wrapper task:
@@ -87,7 +87,7 @@ base64 -i my-release-key.jks -o keystore-base64.txt
 
 ### 3.2: Add Secrets to GitHub
 
-1. Go to your repository: [https://github.com/subhobhai943/AndroidFPSMeter-v2](https://github.com/subhobhai943/AndroidFPSMeter-v2)
+1. Go to your repository: [https://github.com/subhobhai943/AndroidFPSMeter](https://github.com/subhobhai943/AndroidFPSMeter)
 2. Click on **Settings** → **Secrets and variables** → **Actions**
 3. Click **New repository secret** and add these four secrets:
 
@@ -134,7 +134,7 @@ You have two options to trigger the build workflow:
 
 After the workflow completes successfully:
 
-1. Go to the **Releases** page: [https://github.com/subhobhai943/AndroidFPSMeter-v2/releases](https://github.com/subhobhai943/AndroidFPSMeter-v2/releases)
+1. Go to the **Releases** page: [https://github.com/subhobhai943/AndroidFPSMeter/releases](https://github.com/subhobhai943/AndroidFPSMeter/releases)
 2. Find your release (e.g., "AndroidFPSMeter v1.0.0")
 3. Download the signed APK file
 

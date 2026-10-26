@@ -21,8 +21,8 @@
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/subhobhai943/AndroidFPSMeter-v2.git
-   cd AndroidFPSMeter-v2
+   git clone https://github.com/subhobhai943/AndroidFPSMeter.git
+   cd AndroidFPSMeter
    ```
 
 2. **Open in Android Studio:**

@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
+    private lateinit var rootStatusText: TextView
     private lateinit var toggleButton: Button
     private lateinit var permissionHelper: PermissionHelper
 
@@ -58,7 +59,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun initViews() {
         statusText = findViewById(R.id.status_text)
+        rootStatusText = findViewById(R.id.root_status_text)
         toggleButton = findViewById(R.id.toggle_button)
+    }
+
+    private fun checkRootAccess() {
+        Thread {
+            val hasRoot = RealTimeFPSMonitor {}.isRootAvailable()
+            runOnUiThread {
+                if (hasRoot) {
+                    rootStatusText.text = "⚡ Real-Time In-Game FPS Mode (Root Active)"
+                    rootStatusText.setTextColor(ContextCompat.getColor(this, R.color.fps_good))
+                } else {
+                    rootStatusText.text = "Display Refresh Mode (Non-Root)"
+                    rootStatusText.setTextColor(ContextCompat.getColor(this, R.color.fps_medium))
+                }
+            }
+        }.start()
     }
 
     private fun registerServiceStateReceiver() {
@@ -178,6 +195,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         Log.d(TAG, "onResume called")
+        checkRootAccess()
         updateUI(FPSMeterService.isRunning)
     }
 
