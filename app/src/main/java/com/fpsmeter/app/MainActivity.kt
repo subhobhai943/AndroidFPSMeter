@@ -1,23 +1,38 @@
 package com.fpsmeter.app
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import android.util.Log
-import android.os.Handler
-import android.os.Looper
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var toggleButton: Button
     private lateinit var permissionHelper: PermissionHelper
-    private var isServiceRunning = false
-    private val handler = Handler(Looper.getMainLooper())
+
+    private val serviceStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == FPSMeterService.ACTION_STATE_CHANGED) {
+                val isRunning = intent.getBooleanExtra(
+                    FPSMeterService.EXTRA_IS_RUNNING,
+                    FPSMeterService.isRunning
+                )
+                Log.d(TAG, "Service state changed broadcast received: isRunning=$isRunning")
+                updateUI(isRunning)
+            }
+        }
+    }
+
+    private var isReceiverRegistered = false
 
     companion object {
         private const val TAG = "FPSMeter_MainActivity"
@@ -26,12 +41,14 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate called")
-        
+
         try {
             setContentView(R.layout.activity_main)
             initViews()
             permissionHelper = PermissionHelper(this)
-            checkOverlayPermission()
+
+            registerServiceStateReceiver()
+            updateUI(FPSMeterService.isRunning)
             Log.d(TAG, "onCreate completed successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Error in onCreate", e)
@@ -40,123 +57,114 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initViews() {
-        try {
-            statusText = findViewById(R.id.status_text)
-            toggleButton = findViewById(R.id.toggle_button)
-            
-            toggleButton.setOnClickListener {
-                Log.d(TAG, "Toggle button clicked, isServiceRunning: $isServiceRunning")
-                if (isServiceRunning) {
-                    stopFPSMeter()
-                } else {
-                    startFPSMeter()
-                }
-            }
-            Log.d(TAG, "Views initialized successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing views", e)
-            showError("Failed to initialize interface")
+        statusText = findViewById(R.id.status_text)
+        toggleButton = findViewById(R.id.toggle_button)
+    }
+
+    private fun registerServiceStateReceiver() {
+        if (!isReceiverRegistered) {
+            val filter = IntentFilter(FPSMeterService.ACTION_STATE_CHANGED)
+            ContextCompat.registerReceiver(
+                this,
+                serviceStateReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            isReceiverRegistered = true
         }
     }
 
-    private fun checkOverlayPermission() {
-        try {
-            if (!permissionHelper.hasOverlayPermission()) {
-                statusText.text = "Overlay permission required"
-                toggleButton.text = "Grant Permission"
+    private fun unregisterServiceStateReceiver() {
+        if (isReceiverRegistered) {
+            try {
+                unregisterReceiver(serviceStateReceiver)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering receiver", e)
+            } finally {
+                isReceiverRegistered = false
+            }
+        }
+    }
+
+    /**
+     * Centralized UI update based on permissions and service running state.
+     */
+    private fun updateUI(isRunning: Boolean) {
+        if (!permissionHelper.hasOverlayPermission()) {
+            statusText.text = getString(R.string.overlay_permission_required)
+            toggleButton.text = "Grant Overlay Permission"
+            toggleButton.isEnabled = true
+            toggleButton.setOnClickListener {
+                Log.d(TAG, "Requesting overlay permission")
+                permissionHelper.requestOverlayPermission()
+            }
+        } else {
+            if (isRunning) {
+                statusText.text = getString(R.string.fps_monitoring_active)
+                toggleButton.text = "Stop FPS Meter"
+                toggleButton.isEnabled = true
                 toggleButton.setOnClickListener {
-                    Log.d(TAG, "Requesting overlay permission")
-                    permissionHelper.requestOverlayPermission()
+                    stopFPSMeter()
                 }
-                Log.d(TAG, "Overlay permission not granted")
             } else {
                 statusText.text = "Ready to start FPS monitoring"
                 toggleButton.text = "Start FPS Meter"
-                Log.d(TAG, "Overlay permission already granted")
+                toggleButton.isEnabled = true
+                toggleButton.setOnClickListener {
+                    startFPSMeter()
+                }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking overlay permission", e)
-            showError("Permission check failed")
         }
     }
 
     private fun startFPSMeter() {
         Log.d(TAG, "Starting FPS meter...")
-        
+
         try {
             if (!permissionHelper.hasOverlayPermission()) {
                 Log.w(TAG, "Overlay permission not available when starting")
-                showError("Overlay permission required")
-                checkOverlayPermission()
+                updateUI(false)
+                permissionHelper.requestOverlayPermission()
                 return
+            }
+
+            // Request notification permission if needed on Android 13+
+            if (!permissionHelper.hasNotificationPermission()) {
+                permissionHelper.requestNotificationPermission()
             }
 
             statusText.text = "Starting FPS monitoring..."
             toggleButton.isEnabled = false
-            
+
             val intent = Intent(this, FPSMeterService::class.java)
-            
-            try {
-                startForegroundService(intent)
-                Log.d(TAG, "Foreground service start requested")
-                handler.postDelayed({ checkServiceStatus() }, 2000)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start foreground service", e)
-                showError("Failed to start monitoring service")
-                resetUI()
-            }
-            
+            ContextCompat.startForegroundService(this, intent)
+            Log.d(TAG, "Foreground service start requested")
+
+            // Update UI optimistically; receiver will confirm
+            updateUI(true)
         } catch (e: Exception) {
-            Log.e(TAG, "Error in startFPSMeter", e)
-            showError("Failed to start FPS monitoring")
-            resetUI()
-        }
-    }
-    
-    private fun checkServiceStatus() {
-        if (isServiceRunning) {
-            statusText.text = "FPS Meter is running"
-            toggleButton.text = "Stop FPS Meter"
-            toggleButton.isEnabled = true
-            Log.d(TAG, "Service confirmed running")
-        } else {
-            Log.w(TAG, "Service may not have started properly")
-            statusText.text = "Service may have failed to start. Check permissions and try again."
-            toggleButton.text = "Retry Start FPS Meter"
-            toggleButton.isEnabled = true
+            Log.e(TAG, "Error starting FPS meter", e)
+            showError("Failed to start FPS monitoring: ${e.message}")
+            updateUI(false)
         }
     }
 
     private fun stopFPSMeter() {
         Log.d(TAG, "Stopping FPS meter...")
-        
+
         try {
             statusText.text = "Stopping FPS monitoring..."
             toggleButton.isEnabled = false
-            
+
             val intent = Intent(this, FPSMeterService::class.java)
             stopService(intent)
-            
-            handler.postDelayed({
-                isServiceRunning = false
-                statusText.text = "FPS Meter stopped"
-                toggleButton.text = "Start FPS Meter"
-                toggleButton.isEnabled = true
-                Log.d(TAG, "Service stopped")
-            }, 1000)
-            
+
+            updateUI(false)
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping FPS meter", e)
-            showError("Failed to stop FPS monitoring")
-            resetUI()
+            showError("Failed to stop FPS monitoring: ${e.message}")
+            updateUI(FPSMeterService.isRunning)
         }
-    }
-    
-    private fun resetUI() {
-        isServiceRunning = false
-        statusText.text = "Ready to start FPS monitoring"
-        toggleButton.text = "Start FPS Meter"
-        toggleButton.isEnabled = true
     }
 
     private fun showError(message: String) {
@@ -170,24 +178,21 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         Log.d(TAG, "onResume called")
-        
-        try {
-            if (permissionHelper.hasOverlayPermission() && !isServiceRunning) {
-                statusText.text = "Ready to start FPS monitoring"
-                toggleButton.text = "Start FPS Meter"
-                toggleButton.isEnabled = true
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in onResume", e)
-        }
+        updateUI(FPSMeterService.isRunning)
     }
-    
+
+    override fun onDestroy() {
+        unregisterServiceStateReceiver()
+        super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         Log.d(TAG, "onActivityResult: requestCode=$requestCode")
-        
+
         if (requestCode == PermissionHelper.OVERLAY_PERMISSION_REQUEST_CODE) {
-            handler.postDelayed({ checkOverlayPermission() }, 500)
+            updateUI(FPSMeterService.isRunning)
         }
     }
 }

@@ -1,0 +1,40 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+app/build/
+
+# Signing files
+*.jks
+*.keystore
+keystore.properties
+
+# Android Studio Navigation editor temp files
+.navigation/
+
+# Log Files
+*.log
+
+# Never ignore gradle wrapper jar
+!gradle/wrapper/gradle-wrapper.jar

@@ -1,0 +1,129 @@
+name: Build & Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run Unit Tests
+        run: ./gradlew test
+
+      - name: Determine Release Version
+        id: release_info
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.version_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          # Ensure tag starts with v
+          if [[ ! "$TAG" =~ ^v ]]; then
+            TAG="v$TAG"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Setup Signing Keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Using repository signing secret"
+            echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${KEY_ALIAS}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${KEY_PASSWORD}" >> $GITHUB_ENV
+          else
+            echo "Generating release signing keystore on runner"
+            keytool -genkeypair -v -keystore keystore.jks -alias releaseKey -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "androidfpsmeter_release" -keypass "androidfpsmeter_release" \
+              -dname "CN=AndroidFPSMeter, OU=App, O=AndroidFPSMeter, L=City, S=State, C=US"
+            echo "KEYSTORE_PASSWORD=androidfpsmeter_release" >> $GITHUB_ENV
+            echo "KEY_ALIAS=releaseKey" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=androidfpsmeter_release" >> $GITHUB_ENV
+          fi
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Prepare Release Artifacts
+        id: prepare_artifacts
+        run: |
+          RELEASE_DIR="app/build/outputs/apk/release"
+          TAG="${{ steps.release_info.outputs.tag }}"
+          
+          # Find the generated release APK (either app-release.apk or similar)
+          APK_FILE=$(find "$RELEASE_DIR" -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            echo "❌ No release APK found!"
+            exit 1
+          fi
+          
+          TARGET_APK="$RELEASE_DIR/AndroidFPSMeter-$TAG.apk"
+          cp "$APK_FILE" "$TARGET_APK"
+          
+          cd "$RELEASE_DIR"
+          sha256sum "AndroidFPSMeter-$TAG.apk" > "AndroidFPSMeter-$TAG.apk.sha256"
+          echo "✅ Release APK prepared: $TARGET_APK"
+          cat "AndroidFPSMeter-$TAG.apk.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: Android FPS Meter ${{ steps.release_info.outputs.tag }}
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          generate_release_notes: true
+          files: |
+            app/build/outputs/apk/release/AndroidFPSMeter-${{ steps.release_info.outputs.tag }}.apk
+            app/build/outputs/apk/release/AndroidFPSMeter-${{ steps.release_info.outputs.tag }}.apk.sha256
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndroidFPSMeter-${{ steps.release_info.outputs.tag }}
+          path: |
+            app/build/outputs/apk/release/AndroidFPSMeter-${{ steps.release_info.outputs.tag }}.apk
+            app/build/outputs/apk/release/AndroidFPSMeter-${{ steps.release_info.outputs.tag }}.apk.sha256
+          retention-days: 30
